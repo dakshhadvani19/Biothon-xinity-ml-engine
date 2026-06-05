@@ -1,0 +1,11 @@
+# Environments
+venv/
+.env
+
+# Machine Learning Assets
+dataset/
+
+# OS/IDE Bloat
+.vscode/
+__pycache__/
+*.pyc
