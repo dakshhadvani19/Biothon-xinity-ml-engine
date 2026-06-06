@@ -1,9 +1,12 @@
 fastapi
 uvicorn
-python-multipart
-torch
-torchvision
-Pillow
 openai
 pydantic
+torch
+torchvision
+pillow
+reportlab
+requests
+httpx
 python-dotenv
+python-multipart
