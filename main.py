@@ -25,7 +25,7 @@ if os.path.exists(env_path):
         print(f"[WARNING] Error loading .env file manually: {e}")
 from datetime import datetime
 from typing import List, Optional
-from fastapi import FastAPI, UploadFile, File, Response
+from fastapi import FastAPI, UploadFile, File, Response, HTTPException
 import httpx
 from pydantic import BaseModel
 from openai import AsyncOpenAI
@@ -90,6 +90,11 @@ class ReportSettingsPayload(BaseModel):
     custom_smtp_from: Optional[str] = None
     custom_telegram_bot_token: Optional[str] = None
     custom_telegram_chat_id: Optional[str] = None
+
+class PhoneVerifyPayload(BaseModel):
+    phone: str
+    twilio_sid: str
+    twilio_token: str
 
 class NutritionPayload(BaseModel):
     name: Optional[str] = ""
@@ -582,6 +587,33 @@ async def register_report_settings(payload: ReportSettingsPayload):
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
+@app.post("/api/v1/verify-phone")
+async def verify_phone(payload: PhoneVerifyPayload):
+    # If credentials are empty, skip strict verification and just assume valid
+    if not payload.twilio_sid or not payload.twilio_token:
+        return {"valid": True, "message": "Skipped real verification (no credentials)"}
+        
+    url = f"https://lookups.twilio.com/v2/PhoneNumbers/{payload.phone}"
+    
+    async with httpx.AsyncClient() as client:
+        response = await client.get(
+            url,
+            auth=(payload.twilio_sid, payload.twilio_token)
+        )
+        
+        if response.status_code == 404:
+            raise HTTPException(status_code=400, detail="Phone number does not exist.")
+        elif response.status_code != 200:
+            raise HTTPException(status_code=400, detail="Failed to verify number with Twilio.")
+            
+        data = response.json()
+        
+        # In Twilio Lookup v2, valid numbers return valid=True
+        if data.get("valid") is False:
+            raise HTTPException(status_code=400, detail="Phone number is not valid.")
+            
+        return {"valid": True, "message": "Phone number verified successfully"}
+
 @app.get("/api/v1/pdf/{email}")
 async def get_pdf_report(email: str):
     pdf_bytes = PDF_REPORTS_CACHE.get(email)
@@ -923,11 +955,21 @@ async def get_agronomic_insights(payload: WeatherPayload):
             model="llama-3.1-8b-instant",
             messages=[
                 {
-                    "role": "system", 
-                    "content": "You are the Agronomic Intelligence Engine for AgriShield. You will receive real-time weather data AND a list of specific farms (crop + soil type) owned by the user. Generate 3 highly technical, actionable agronomic instructions. IF farm data is provided, you MUST tailor the advice specifically to those exact crops and soil combinations based on the weather parameters. IF no farm data is provided, give general high-level advice for the Saurashtra region. Return ONLY a valid JSON object with exactly one key named 'insights' containing an array of 3 strings."
+                    "role": "system",
+                    "content": (
+                        "You are the Agronomic Intelligence Engine for AgriShield. "
+                        "You will receive real-time weather data AND a list of specific farms (crop + soil type) owned by the user. "
+                        "Generate 3 highly technical, actionable agronomic instructions. "
+                        "IF farm data is provided, tailor advice to those exact crops and soil combinations based on weather. "
+                        "IF no farm data is provided, give general advice for the Saurashtra region. "
+                        "Return ONLY a valid JSON object with exactly two keys: "
+                        "'insights_en' (array of 3 strings in English) and "
+                        "'insights_hi' (array of the same 3 strings translated into Hindi in Devanagari script). "
+                        "Do NOT add any other keys."
+                    )
                 },
                 {
-                    "role": "user", 
+                    "role": "user",
                     "content": f"Weather Telemetry: {json.dumps(payload.data)}\nUser Farms: {json.dumps(payload.farms)}"
                 }
             ],
@@ -936,13 +978,23 @@ async def get_agronomic_insights(payload: WeatherPayload):
         raw_content = response.choices[0].message.content
         if not raw_content:
             raise ValueError("Groq returned an empty response body.")
-            
+
         sanitized_content = raw_content.replace("```json", "").replace("```", "").strip()
-        return json.loads(sanitized_content)
+        parsed = json.loads(sanitized_content)
+
+        # Backwards-compat: if model returns old 'insights' key, map it forward
+        if "insights" in parsed and "insights_en" not in parsed:
+            parsed["insights_en"] = parsed.pop("insights")
+            parsed["insights_hi"] = []
+
+        return parsed
     except Exception as e:
         print(f"[ERROR] CRITICAL LLM EXCEPTION: {e}")
         traceback.print_exc()
-        return {"insights": ["AI advisory system is temporarily syncing. Adhere to standard crop protocols."]}
+        return {
+            "insights_en": ["AI advisory system is temporarily syncing. Adhere to standard crop protocols."],
+            "insights_hi": ["AI सलाह प्रणाली अस्थायी रूप से समन्वय कर रही है। मानक फसल प्रोटोकॉल का पालन करें।"]
+        }
 
 @app.post("/api/v1/check-suitability")
 async def check_crop_suitability(payload: SuitabilityPayload):
@@ -1075,19 +1127,38 @@ CORE RULES — FOLLOW STRICTLY:
         for msg in user_messages:
             messages.append({"role": msg.role, "content": msg.content})
             
+        # Wrap the last user message to request bilingual JSON output
+        bilingual_suffix = (
+            "\n\n[IMPORTANT] You MUST respond with ONLY a valid JSON object — no markdown, no explanation. "
+            "The JSON must have exactly two keys: "
+            "'content_en' (your full answer in English) and "
+            "'content_hi' (the EXACT same answer translated into Hindi, written in Devanagari script). "
+            "Do NOT add any other keys. Do NOT wrap in code blocks."
+        )
+        # Inject the bilingual instruction into the last user message
+        if messages and messages[-1]["role"] == "user":
+            messages[-1]["content"] = messages[-1]["content"] + bilingual_suffix
+
         response = await client.chat.completions.create(
             model="llama-3.1-8b-instant",
             messages=messages,
-            temperature=0.3,       # Low temperature = factual, consistent answers
-            max_tokens=800,        # Enough for a thorough answer, not wasteful
+            response_format={"type": "json_object"},
+            temperature=0.3,
+            max_tokens=1600,
         )
-        
-        assistant_reply = response.choices[0].message.content
-        return {"content": assistant_reply}
+
+        raw = response.choices[0].message.content or "{}"
+        parsed = json.loads(raw.replace("```json", "").replace("```", "").strip())
+        content_en = parsed.get("content_en") or parsed.get("content") or raw
+        content_hi = parsed.get("content_hi") or ""
+        return {"content_en": content_en, "content_hi": content_hi}
     except Exception as e:
         print(f"[ERROR] CRITICAL CHAT LLM EXCEPTION: {e}")
         traceback.print_exc()
-        return {"content": "🌾 I'm temporarily unavailable. Please try again in a moment — your farm can't wait!"}
+        return {
+            "content_en": "🌾 I'm temporarily unavailable. Please try again in a moment — your farm can't wait!",
+            "content_hi": "🌾 मैं अभी उपलब्ध नहीं हूँ। कृपया एक क्षण में पुनः प्रयास करें — आपका खेत इंतजार नहीं कर सकता!"
+        }
 
 @app.post("/api/v1/analyze-nutrition")
 async def analyze_nutrition(payload: NutritionPayload):
