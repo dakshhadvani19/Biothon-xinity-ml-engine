@@ -965,7 +965,8 @@ async def get_agronomic_insights(payload: WeatherPayload):
                         "Return ONLY a valid JSON object with exactly two keys: "
                         "'insights_en' (array of 3 strings in English) and "
                         "'insights_hi' (array of the same 3 strings translated into Hindi in Devanagari script). "
-                        "Do NOT add any other keys."
+                        "Do NOT add any other keys. "
+                        "Do NOT use any emojis in your response under any circumstances. Keep the text clean and professional."
                     )
                 },
                 {
@@ -1114,10 +1115,11 @@ CORE RULES — FOLLOW STRICTLY:
 2. USE REAL DATA FIRST: Always reference the farmer's specific crops, soil types, and current weather when giving advice. Be specific — name exact fertilizer doses (kg/ha), irrigation intervals, pesticide names.
 3. GENERAL FARMING FALLBACK: If the farmer asks a farming question you don't have direct data for, you STILL answer confidently using established agronomic knowledge. Aim for practical, research-backed advice. State if the advice is general vs farm-specific.
 4. OUT-OF-SCOPE HANDLING: If a question is completely unrelated to farming (e.g., cricket scores, politics, movies, coding), respond with ONLY this message — do NOT add anything else:
-   "🌾 I'm designed to assist exclusively with farming and agriculture. This question is outside my field of expertise. Please ask me anything about your crops, soil, irrigation, or farm management — I'm here to help your farm thrive!"
+   "I'm designed to assist exclusively with farming and agriculture. This question is outside my field of expertise. Please ask me anything about your crops, soil, irrigation, or farm management — I'm here to help your farm thrive!"
 5. ACCURACY OVER COMPLETENESS: If you are unsure about a highly specific regional or regulatory detail, say so clearly and provide the closest scientifically accurate answer you can. Never fabricate numbers or product names.
 6. FORMAT: Use bullet points for multi-step answers. Bold key terms. Keep answers concise but complete. Start directly — no "Great question!" filler.
 7. WEATHER-AWARE: Always factor the current weather telemetry into your recommendations where relevant (e.g., don't recommend irrigation if it's raining, warn about fungal risk in high humidity).
+8. NO EMOJIS: Do NOT use any emojis (especially the 🌾 emoji) in your response under any circumstances. Keep the text clean and professional.
 """
 
         messages = [{"role": "system", "content": system_content}]
@@ -1156,8 +1158,8 @@ CORE RULES — FOLLOW STRICTLY:
         print(f"[ERROR] CRITICAL CHAT LLM EXCEPTION: {e}")
         traceback.print_exc()
         return {
-            "content_en": "🌾 I'm temporarily unavailable. Please try again in a moment — your farm can't wait!",
-            "content_hi": "🌾 मैं अभी उपलब्ध नहीं हूँ। कृपया एक क्षण में पुनः प्रयास करें — आपका खेत इंतजार नहीं कर सकता!"
+            "content_en": "I'm temporarily unavailable. Please try again in a moment — your farm can't wait!",
+            "content_hi": "मैं अभी उपलब्ध नहीं हूँ। कृपया एक क्षण में पुनः प्रयास करें — आपका खेत इंतजार नहीं कर सकता!"
         }
 
 @app.post("/api/v1/analyze-nutrition")
