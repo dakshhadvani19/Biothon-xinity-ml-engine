@@ -1258,3 +1258,96 @@ async def mock_predict(file: UploadFile = File(...)):
         "confidence": 0.99,
         "mocked": True
     }
+
+class ImageCropValidationPayload(BaseModel):
+    crop_name: str
+    image: str  # base64 data URI
+
+@app.post("/api/v1/validate-image-crop")
+async def validate_image_crop(payload: ImageCropValidationPayload):
+    """
+    Validates whether the uploaded image matches the entered crop name.
+    Uses Groq vision model to identify what the image actually shows,
+    then fuzzy-compares it against the user-entered crop name.
+    Returns: { valid: bool, detected_as: str, reason: str }
+    """
+    api_key = os.environ.get("GROQ_API_KEY")
+    if not api_key:
+        # If no API key, skip validation and allow analysis to proceed
+        return {"valid": True, "detected_as": "unknown", "reason": "Validation skipped (no API key configured)."}
+
+    client = AsyncOpenAI(api_key=api_key, base_url="https://api.groq.com/openai/v1")
+
+    # Extract clean base64
+    base64_image = payload.image
+    if "," in base64_image:
+        base64_image = base64_image.split(",", 1)[1]
+
+    vision_models = [
+        "llama-3.2-11b-vision-preview",
+        "llama-3.2-90b-vision-preview",
+        "meta-llama/llama-4-scout-17b-16e-instruct"
+    ]
+
+    entered_name = payload.crop_name.strip().lower()
+    detected_as = "unknown"
+
+    for model in vision_models:
+        try:
+            response = await client.chat.completions.create(
+                model=model,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": (
+                                    f"The user claims this image shows a '{payload.crop_name}'. "
+                                    "Look at this image carefully. "
+                                    "First, identify what plant, crop, vegetable, or fruit is actually in the image (one word or short name). "
+                                    "Then, decide if it matches or is related to what the user claims. "
+                                    "Be LENIENT — if the user entered 'banana' and the image shows a banana plant, banana leaf, banana fruit, or banana tree, that should be VALID. "
+                                    "Also be lenient with soil images — if the user uploaded a plain soil image without any crop, that should also be VALID as additional context. "
+                                    "Reply ONLY in this exact JSON format (no markdown):\n"
+                                    "{\"detected_as\": \"<what you see>\", \"is_match\": true or false, \"reason\": \"<one short sentence>\"}"
+                                )
+                            },
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": f"data:image/jpeg;base64,{base64_image}"
+                                }
+                            }
+                        ]
+                    }
+                ],
+                max_tokens=120,
+                temperature=0.1
+            )
+
+            raw = response.choices[0].message.content.strip()
+            # Strip markdown code fences if present
+            raw = raw.replace("```json", "").replace("```", "").strip()
+            parsed = json.loads(raw)
+
+            detected_as = parsed.get("detected_as", "unknown")
+            is_match = parsed.get("is_match", True)
+            reason = parsed.get("reason", "")
+
+            return {
+                "valid": bool(is_match),
+                "detected_as": detected_as,
+                "reason": reason
+            }
+
+        except json.JSONDecodeError as je:
+            print(f"[WARNING] JSON parse failed for model {model}: {je}. Raw: {raw}")
+            continue
+        except Exception as e:
+            print(f"[WARNING] validate-image-crop failed with model {model}: {e}")
+            continue
+
+    # If all models fail, allow through rather than blocking the user
+    print("[WARNING] All vision models failed for image validation, allowing analysis.")
+    return {"valid": True, "detected_as": "unknown", "reason": "Vision check skipped due to service unavailability."}
