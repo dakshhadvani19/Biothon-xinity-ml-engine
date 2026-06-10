@@ -1002,75 +1002,96 @@ async def check_crop_suitability(payload: SuitabilityPayload):
     try:
         api_key = os.environ.get("GROQ_API_KEY")
         if not api_key:
-            raise ValueError("GROQ_API_KEY environment variable is not set on Vercel.")
-            
+            raise ValueError("GROQ_API_KEY environment variable is not set.")
+
         client = AsyncOpenAI(api_key=api_key, base_url="https://api.groq.com/openai/v1")
-        
+
+        # Derive region context from coordinates
+        lat, lon = payload.lat, payload.lon
+        region_hint = ""
+        if 8 <= lat <= 37 and 68 <= lon <= 97:
+            if lat < 15:
+                region_hint = "tropical south India (high humidity, heavy monsoon rainfall 1500-3000mm/yr, laterite soils common)"
+            elif lat < 22:
+                region_hint = "peninsular or central India (semi-arid to sub-humid, moderate monsoon 700-1200mm/yr, black cotton and red soils)"
+            elif lat < 28:
+                region_hint = "north-central or western India (dry winters below 15C, hot summers above 40C, 400-700mm/yr rainfall)"
+            else:
+                region_hint = "northern India and Indo-Gangetic plains (cold winters 5-15C, very hot summers 35-45C, fertile alluvial soils, 600-900mm/yr)"
+        else:
+            region_hint = f"region at lat={lat:.2f}, lon={lon:.2f}"
+
         system_content = (
-            "You are the AgriShield Crop Suitability Engine. Analyze if a user-supplied crop "
-            "is suitable to grow in their current location, matching coordinates (latitude/longitude), "
-            "soil type, and current weather. Determine if this crop is viable, considering typical yearly seasons "
-            "for this region. Return ONLY a valid JSON object with exactly the following keys: "
-            "'suitable' (string: 'Highly Suitable', 'Moderately Suitable', or 'Unsuitable'), "
-            "'suitability_score' (integer: 0-100), "
-            "'weather_analysis' (string summarizing weather/climate constraints or benefits), "
-            "'soil_analysis' (string detailing soil-crop compatibility), "
-            "'yearly_climate_analysis' (string summarizing typical yearly weather conditions and whether they fit), "
-            "'recommendations' (array of strings detailing agronomic suggestions), and "
-            "'precautions' (array of strings listing risks and warnings)."
+            "You are an expert agronomist and crop scientist with 30 years of field experience in South Asian agriculture.\n"
+            "Your task is to give an ACCURATE, SPECIFIC, and HONEST suitability assessment for a given crop based on exact conditions.\n\n"
+            "CRITICAL RULES:\n"
+            "- Base your answer STRICTLY on the actual agronomy of the specific crop and the exact conditions provided.\n"
+            "- DO NOT give generic or vague answers. Every single field must be specific to THIS crop, THIS soil, THIS region, and THIS weather.\n"
+            "- If the crop is genuinely unsuitable for the region or soil, state that clearly with a low score (0-30) and explain exactly why.\n"
+            "- Use real agronomic knowledge: optimal temperature ranges, rainfall requirements, soil pH, seasonal windows, and growing duration.\n"
+            "- The suitability_score MUST reflect reality. Example: A tropical crop like Coconut in cold north India should score below 20.\n"
+            "- Recommendations and precautions must be ACTIONABLE and 100% specific to THIS crop in THESE exact conditions.\n"
+            "- Return ONLY a valid JSON object with exactly these keys:\n"
+            "  suitable (string: Highly Suitable, Moderately Suitable, or Unsuitable),\n"
+            "  suitability_score (integer 0 to 100),\n"
+            "  weather_analysis (2-3 sentences specific to this crop and current weather),\n"
+            "  soil_analysis (2-3 sentences on this soil type and this crop compatibility),\n"
+            "  yearly_climate_analysis (2-3 sentences on seasonal fit for this crop in this region),\n"
+            "  recommendations (array of 4-5 specific actionable steps for this crop in these conditions),\n"
+            "  precautions (array of 3-4 specific risks for this crop in this region and soil)"
         )
-        
+
         user_content = (
-            f"Crop: {payload.crop_name}\n"
-            f"Location coordinates: latitude {payload.lat}, longitude {payload.lon}\n"
-            f"Soil Type: {payload.soil_type}\n"
-            f"Current Weather Telemetry: {payload.current_temp}°C, {payload.current_condition}"
+            f"Crop to evaluate: {payload.crop_name}\n"
+            f"Geographic region: {region_hint} (lat={lat:.4f}, lon={lon:.4f})\n"
+            f"Soil type: {payload.soil_type}\n"
+            f"Current weather: {payload.current_temp}C, condition={payload.current_condition}\n\n"
+            f"Provide a thorough crop-specific suitability report. Be precise, honest, and crop-specific."
         )
-        
+
         response = await client.chat.completions.create(
-            model="llama3-8b-8192",
+            model="llama-3.3-70b-versatile",
             messages=[
                 {"role": "system", "content": system_content},
                 {"role": "user", "content": user_content}
             ],
-            response_format={"type": "json_object"}
+            response_format={"type": "json_object"},
+            temperature=0.2,
+            max_tokens=1500,
         )
-        
+
         raw_content = response.choices[0].message.content
         if not raw_content:
-            raise ValueError("Groq returned an empty response body.")
-            
+            raise ValueError("LLM returned an empty response.")
+
         sanitized_content = raw_content.replace("```json", "").replace("```", "").strip()
         result = json.loads(sanitized_content)
 
-        # --- Generate a full pure-Hindi narration for TTS ---
+        # Generate a pure-Hindi narration for TTS
         try:
             score = result.get("suitability_score", 0)
             suitable = result.get("suitable", "")
             recs = result.get("recommendations", [])
             precs = result.get("precautions", [])
             suitable_hi = (
-                "अत्यंत उपयुक्त" if suitable == "Highly Suitable"
-                else "मध्यम रूप से उपयुक्त" if suitable == "Moderately Suitable"
-                else "अनुपयुक्त"
+                "atyadhik upayukt" if suitable == "Highly Suitable"
+                else "madhyam roop se upayukt" if suitable == "Moderately Suitable"
+                else "anupayukt"
             )
-            recs_text = "। ".join(recs[:3]) if recs else ""
-            precs_text = "। ".join(precs[:2]) if precs else ""
+            recs_text = ". ".join(recs[:3]) if recs else ""
+            precs_text = ". ".join(precs[:2]) if precs else ""
 
             hindi_prompt = (
-                f"तुम एक कृषि विशेषज्ञ हो। नीचे दी गई जानकारी के आधार पर किसान के लिए एक संक्षिप्त और स्पष्ट सारांश हिंदी में लिखो। "
-                f"केवल शुद्ध हिंदी का उपयोग करो — कोई अंग्रेज़ी शब्द मत लिखो। "
-                f"फसल: {payload.crop_name}। मिट्टी: {payload.soil_type}। "
-                f"उपयुक्तता: {suitable_hi}। स्कोर: {score} प्रतिशत। "
-                f"सिफारिशें (अनुवाद करो): {recs_text}। "
-                f"सावधानियाँ (अनुवाद करो): {precs_text}। "
-                f"तीन से चार वाक्य में बताओ — पूरी तरह हिंदी में।"
+                f"Tum ek krishi visheshagya ho. Fasal: {payload.crop_name}. Mitti: {payload.soil_type}. "
+                f"Upayuktataa: {suitable_hi}. Score: {score} pratishat. "
+                f"Sifarishen: {recs_text}. Savdhaaniyan: {precs_text}. "
+                f"Teen se chaar vaakya mein Hindi mein saaraansh do."
             )
 
             hindi_response = await client.chat.completions.create(
                 model="llama3-8b-8192",
                 messages=[
-                    {"role": "system", "content": "तुम एक हिंदी कृषि सलाहकार हो। केवल शुद्ध हिंदी में उत्तर दो।"},
+                    {"role": "system", "content": "Tum ek Hindi krishi salahkar ho. Sirf shuddh Hindi mein uttar do."},
                     {"role": "user", "content": hindi_prompt}
                 ],
                 max_tokens=300,
@@ -1080,31 +1101,16 @@ async def check_crop_suitability(payload: SuitabilityPayload):
         except Exception as hi_err:
             print(f"[WARNING] Hindi narration generation failed: {hi_err}")
             result["hindi_narration"] = (
-                f"{payload.crop_name} फसल की उपयुक्तता रिपोर्ट। "
-                f"अनुकूलता स्कोर {result.get('suitability_score', 0)} प्रतिशत है। "
-                f"निर्णय: {suitable_hi}। किसान से अनुरोध है कि स्थानीय कृषि विशेषज्ञ से परामर्श लें।"
+                f"{payload.crop_name} fasal ki upayuktataa report. "
+                f"Score {result.get('suitability_score', 0)} pratishat. "
+                f"Nishchay: {suitable_hi}."
             )
 
         return result
     except Exception as e:
-        print(f"[ERROR] CRITICAL LLM EXCEPTION: {e}")
+        print(f"[ERROR] CRITICAL LLM EXCEPTION in check-suitability: {e}")
         traceback.print_exc()
-        return {
-            "suitable": "Moderately Suitable",
-            "suitability_score": 60,
-            "weather_analysis": "Local weather parameters are currently within normal baseline ranges for standard cultivation.",
-            "soil_analysis": f"The soil profile ({payload.soil_type}) supports root growth under proper moisture regulation.",
-            "yearly_climate_analysis": "Regional yearly precipitation patterns show suitability, though seasonal variations require active irrigation.",
-            "recommendations": [
-                "Verify soil nutrient index before initiating planting cycle.",
-                "Utilize drip irrigation to optimize water delivery systems."
-            ],
-            "precautions": [
-                "Monitor local weather forecasts for unseasonal rainfall alerts.",
-                "Ensure proper drainage channels are maintained."
-            ],
-            "hindi_narration": f"{payload.crop_name} फसल की जानकारी अभी उपलब्ध नहीं है। कृपया पुनः प्रयास करें।"
-        }
+        raise HTTPException(status_code=500, detail=f"Crop suitability analysis failed: {str(e)}")
 
 
 @app.post("/api/v1/chat")
