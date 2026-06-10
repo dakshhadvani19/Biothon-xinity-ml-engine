@@ -1041,7 +1041,51 @@ async def check_crop_suitability(payload: SuitabilityPayload):
             raise ValueError("Groq returned an empty response body.")
             
         sanitized_content = raw_content.replace("```json", "").replace("```", "").strip()
-        return json.loads(sanitized_content)
+        result = json.loads(sanitized_content)
+
+        # --- Generate a full pure-Hindi narration for TTS ---
+        try:
+            score = result.get("suitability_score", 0)
+            suitable = result.get("suitable", "")
+            recs = result.get("recommendations", [])
+            precs = result.get("precautions", [])
+            suitable_hi = (
+                "अत्यंत उपयुक्त" if suitable == "Highly Suitable"
+                else "मध्यम रूप से उपयुक्त" if suitable == "Moderately Suitable"
+                else "अनुपयुक्त"
+            )
+            recs_text = "। ".join(recs[:3]) if recs else ""
+            precs_text = "। ".join(precs[:2]) if precs else ""
+
+            hindi_prompt = (
+                f"तुम एक कृषि विशेषज्ञ हो। नीचे दी गई जानकारी के आधार पर किसान के लिए एक संक्षिप्त और स्पष्ट सारांश हिंदी में लिखो। "
+                f"केवल शुद्ध हिंदी का उपयोग करो — कोई अंग्रेज़ी शब्द मत लिखो। "
+                f"फसल: {payload.crop_name}। मिट्टी: {payload.soil_type}। "
+                f"उपयुक्तता: {suitable_hi}। स्कोर: {score} प्रतिशत। "
+                f"सिफारिशें (अनुवाद करो): {recs_text}। "
+                f"सावधानियाँ (अनुवाद करो): {precs_text}। "
+                f"तीन से चार वाक्य में बताओ — पूरी तरह हिंदी में।"
+            )
+
+            hindi_response = await client.chat.completions.create(
+                model="llama3-8b-8192",
+                messages=[
+                    {"role": "system", "content": "तुम एक हिंदी कृषि सलाहकार हो। केवल शुद्ध हिंदी में उत्तर दो।"},
+                    {"role": "user", "content": hindi_prompt}
+                ],
+                max_tokens=300,
+                temperature=0.3,
+            )
+            result["hindi_narration"] = hindi_response.choices[0].message.content.strip()
+        except Exception as hi_err:
+            print(f"[WARNING] Hindi narration generation failed: {hi_err}")
+            result["hindi_narration"] = (
+                f"{payload.crop_name} फसल की उपयुक्तता रिपोर्ट। "
+                f"अनुकूलता स्कोर {result.get('suitability_score', 0)} प्रतिशत है। "
+                f"निर्णय: {suitable_hi}। किसान से अनुरोध है कि स्थानीय कृषि विशेषज्ञ से परामर्श लें।"
+            )
+
+        return result
     except Exception as e:
         print(f"[ERROR] CRITICAL LLM EXCEPTION: {e}")
         traceback.print_exc()
@@ -1058,8 +1102,10 @@ async def check_crop_suitability(payload: SuitabilityPayload):
             "precautions": [
                 "Monitor local weather forecasts for unseasonal rainfall alerts.",
                 "Ensure proper drainage channels are maintained."
-            ]
+            ],
+            "hindi_narration": f"{payload.crop_name} फसल की जानकारी अभी उपलब्ध नहीं है। कृपया पुनः प्रयास करें।"
         }
+
 
 @app.post("/api/v1/chat")
 async def chat_suggestions(payload: ChatPayload):
