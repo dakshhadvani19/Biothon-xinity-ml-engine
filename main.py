@@ -24,7 +24,8 @@ if os.path.exists(env_path):
     except Exception as e:
         print(f"[WARNING] Error loading .env file manually: {e}")
 from datetime import datetime
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
+from crop_knowledge_base import fuzzy_match_crop, calculate_suitability, CROP_DB
 from fastapi import FastAPI, UploadFile, File, Response, HTTPException
 import httpx
 from pydantic import BaseModel
@@ -59,6 +60,7 @@ class SuitabilityPayload(BaseModel):
     soil_type: str
     current_temp: Optional[float] = 0.0
     current_condition: Optional[str] = "Unknown"
+    image: Optional[str] = None  # base64-encoded image from the farmer's field (optional)
 
 class ChatMessage(BaseModel):
     role: str
@@ -999,116 +1001,208 @@ async def get_agronomic_insights(payload: WeatherPayload):
 
 @app.post("/api/v1/check-suitability")
 async def check_crop_suitability(payload: SuitabilityPayload):
+    """
+    3-Layer Crop Suitability Intelligence Engine:
+      Layer 1: Fuzzy-match crop name against a 78-crop agronomic knowledge base.
+      Layer 2: Deterministic scoring (temp / soil / rainfall / season) — zero hallucination.
+      Layer 3: LLM narration of the pre-calculated facts into expert professional prose.
+    If image is provided, a vision model analyzes field/soil conditions and adds context.
+    """
     try:
         api_key = os.environ.get("GROQ_API_KEY")
         if not api_key:
-            raise ValueError("GROQ_API_KEY environment variable is not set.")
+            raise HTTPException(status_code=500, detail="GROQ_API_KEY is not configured on this server.")
 
         client = AsyncOpenAI(api_key=api_key, base_url="https://api.groq.com/openai/v1")
 
-        # Derive region context from coordinates
-        lat, lon = payload.lat, payload.lon
-        region_hint = ""
-        if 8 <= lat <= 37 and 68 <= lon <= 97:
-            if lat < 15:
-                region_hint = "tropical south India (high humidity, heavy monsoon rainfall 1500-3000mm/yr, laterite soils common)"
-            elif lat < 22:
-                region_hint = "peninsular or central India (semi-arid to sub-humid, moderate monsoon 700-1200mm/yr, black cotton and red soils)"
-            elif lat < 28:
-                region_hint = "north-central or western India (dry winters below 15C, hot summers above 40C, 400-700mm/yr rainfall)"
-            else:
-                region_hint = "northern India and Indo-Gangetic plains (cold winters 5-15C, very hot summers 35-45C, fertile alluvial soils, 600-900mm/yr)"
-        else:
-            region_hint = f"region at lat={lat:.2f}, lon={lon:.2f}"
+        # ---------------------------------------------------------------
+        # LAYER 1: Fuzzy-match crop to knowledge base
+        # ---------------------------------------------------------------
+        crop_key = fuzzy_match_crop(payload.crop_name)
+        if crop_key is None:
+            # Crop not in knowledge base — return a clear "not in database" response
+            return {
+                "not_in_database": True,
+                "crop_name": payload.crop_name,
+                "message": f"'{payload.crop_name}' is not in our agronomic knowledge base. Please try one of the 78+ supported crops (e.g., Rice, Wheat, Tomato, Banana, Cotton, Mango).",
+                "data_source": "not_available",
+            }
 
-        system_content = (
-            "You are an expert agronomist and crop scientist with 30 years of field experience in South Asian agriculture.\n"
-            "Your task is to give an ACCURATE, SPECIFIC, and HONEST suitability assessment for a given crop based on exact conditions.\n\n"
-            "CRITICAL RULES:\n"
-            "- Base your answer STRICTLY on the actual agronomy of the specific crop and the exact conditions provided.\n"
-            "- DO NOT give generic or vague answers. Every single field must be specific to THIS crop, THIS soil, THIS region, and THIS weather.\n"
-            "- If the crop is genuinely unsuitable for the region or soil, state that clearly with a low score (0-30) and explain exactly why.\n"
-            "- Use real agronomic knowledge: optimal temperature ranges, rainfall requirements, soil pH, seasonal windows, and growing duration.\n"
-            "- The suitability_score MUST reflect reality. Example: A tropical crop like Coconut in cold north India should score below 20.\n"
-            "- Recommendations and precautions must be ACTIONABLE and 100% specific to THIS crop in THESE exact conditions.\n"
-            "- Return ONLY a valid JSON object with exactly these keys:\n"
-            "  suitable (string: Highly Suitable, Moderately Suitable, or Unsuitable),\n"
-            "  suitability_score (integer 0 to 100),\n"
-            "  weather_analysis (2-3 sentences specific to this crop and current weather),\n"
-            "  soil_analysis (2-3 sentences on this soil type and this crop compatibility),\n"
-            "  yearly_climate_analysis (2-3 sentences on seasonal fit for this crop in this region),\n"
-            "  recommendations (array of 4-5 specific actionable steps for this crop in these conditions),\n"
-            "  precautions (array of 3-4 specific risks for this crop in this region and soil)"
+        print(f"[INFO] Crop '{payload.crop_name}' matched to knowledge base key: '{crop_key}'")
+
+        # ---------------------------------------------------------------
+        # LAYER 2: Deterministic scoring (zero hallucination)
+        # ---------------------------------------------------------------
+        calc = calculate_suitability(
+            crop_key=crop_key,
+            soil_type=payload.soil_type,
+            current_temp=payload.current_temp or 0.0,
+            lat=payload.lat,
+            lon=payload.lon,
+        )
+        sub_scores = calc["sub_scores"]
+        crop_facts = calc["crop_facts"]
+        region = calc["region"]
+        total = calc["suitability_score"]
+        suitable = calc["suitable"]
+
+        # ---------------------------------------------------------------
+        # IMAGE ANALYSIS (optional): Vision model analyzes field/soil
+        # ---------------------------------------------------------------
+        image_context = ""
+        if payload.image:
+            try:
+                vision_response = await client.chat.completions.create(
+                    model="meta-llama/llama-4-scout-17b-16e-instruct",
+                    messages=[
+                        {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "text",
+                                    "text": (
+                                        f"A farmer wants to know if {calc['crop_display_name']} will grow on their land. "
+                                        f"Analyze this field/soil image from an expert agronomic perspective. Identify: "
+                                        f"1) Soil appearance (color, texture, visible moisture, organic matter content), "
+                                        f"2) Field conditions (drainage, slope, waterlogging signs, erosion), "
+                                        f"3) Visible environmental indicators (shade, surrounding trees, stone/rock presence), "
+                                        f"4) Any concerns or positive indicators for growing {calc['crop_display_name']}. "
+                                        f"Be concise and agricultural-expert level. Max 4 sentences."
+                                    ),
+                                },
+                                {
+                                    "type": "image_url",
+                                    "image_url": {"url": f"data:image/jpeg;base64,{payload.image}"},
+                                },
+                            ],
+                        }
+                    ],
+                    max_tokens=300,
+                )
+                image_context = vision_response.choices[0].message.content.strip()
+                print(f"[INFO] Image analysis complete: {image_context[:80]}...")
+            except Exception as img_err:
+                print(f"[WARNING] Image analysis failed (non-critical): {img_err}")
+                image_context = ""
+
+        # ---------------------------------------------------------------
+        # LAYER 3: LLM narration — writes prose from the pre-calculated facts
+        # ---------------------------------------------------------------
+        key_facts_str = "\n".join(f"- {f}" for f in crop_facts["key_facts"])
+        risks_str = "\n".join(f"- {r}" for r in crop_facts["risks"])
+        image_section = f"\n\nFIELD IMAGE ANALYSIS (from farmer's uploaded photo):\n{image_context}" if image_context else ""
+
+        narration_system = (
+            "You are an expert agronomic consultant writing a professional crop suitability field report. "
+            "All scores and reasons have been PRE-CALCULATED by a scientific agronomic engine — you MUST NOT change them. "
+            "Your ONLY job is to convert the provided factual data into professional, expert-sounding narrative prose. "
+            "Every sentence must be specific and grounded in the provided facts. "
+            "Return ONLY a valid JSON object with no extra commentary."
         )
 
-        user_content = (
-            f"Crop to evaluate: {payload.crop_name}\n"
-            f"Geographic region: {region_hint} (lat={lat:.4f}, lon={lon:.4f})\n"
-            f"Soil type: {payload.soil_type}\n"
-            f"Current weather: {payload.current_temp}C, condition={payload.current_condition}\n\n"
-            f"Provide a thorough crop-specific suitability report. Be precise, honest, and crop-specific."
+        narration_user = (
+            f"SCIENTIFICALLY CALCULATED REPORT DATA (do not alter any numbers or verdicts):\n"
+            f"Crop: {calc['crop_display_name']}\n"
+            f"Region: {region['name']} — {region['climate']}\n"
+            f"Soil Selected: {payload.soil_type}\n"
+            f"Current Temperature: {payload.current_temp}°C ({payload.current_condition})\n"
+            f"Overall Suitability: {suitable} ({total}/100)\n\n"
+            f"TEMPERATURE SCORE: {sub_scores['temperature']['score']}/25 [{sub_scores['temperature']['status'].upper()}]\n"
+            f"Reason: {sub_scores['temperature']['reason']}\n\n"
+            f"SOIL SCORE: {sub_scores['soil']['score']}/25 [{sub_scores['soil']['status'].upper()}]\n"
+            f"Reason: {sub_scores['soil']['reason']}\n\n"
+            f"RAINFALL SCORE: {sub_scores['rainfall']['score']}/25 [{sub_scores['rainfall']['status'].upper()}]\n"
+            f"Reason: {sub_scores['rainfall']['reason']}\n\n"
+            f"SEASON SCORE: {sub_scores['season']['score']}/25 [{sub_scores['season']['status'].upper()}]\n"
+            f"Reason: {sub_scores['season']['reason']}\n\n"
+            f"CROP SCIENTIFIC FACTS FROM DATABASE:\n{key_facts_str}\n\n"
+            f"KNOWN RISKS FOR THIS CROP IN INDIA:\n{risks_str}"
+            f"{image_section}\n\n"
+            f"Using ONLY the data above, write the following JSON:\n"
+            f"{{\n"
+            f"  \"weather_analysis\": \"2-3 sentences about temperature and seasonal timing based on the calculated scores\",\n"
+            f"  \"soil_analysis\": \"2-3 sentences about soil compatibility based on the soil score and facts\",\n"
+            f"  \"yearly_climate_analysis\": \"2-3 sentences about annual rainfall and regional climate fit\",\n"
+            f"  \"recommendations\": [\"4-5 specific, actionable cultivation steps tailored to this crop, soil, and region\"],\n"
+            f"  \"precautions\": [\"3-4 specific risks and warnings for this exact crop-soil-region combination\"]\n"
+            f"}}"
         )
 
-        response = await client.chat.completions.create(
+        narration_response = await client.chat.completions.create(
             model="llama-3.3-70b-versatile",
             messages=[
-                {"role": "system", "content": system_content},
-                {"role": "user", "content": user_content}
+                {"role": "system", "content": narration_system},
+                {"role": "user", "content": narration_user},
             ],
             response_format={"type": "json_object"},
-            temperature=0.2,
+            temperature=0.3,
             max_tokens=1500,
         )
 
-        raw_content = response.choices[0].message.content
-        if not raw_content:
-            raise ValueError("LLM returned an empty response.")
+        raw_narration = narration_response.choices[0].message.content
+        if not raw_narration:
+            raise ValueError("LLM narration returned an empty response.")
 
-        sanitized_content = raw_content.replace("```json", "").replace("```", "").strip()
-        result = json.loads(sanitized_content)
+        narration = json.loads(raw_narration.replace("```json", "").replace("```", "").strip())
 
-        # Generate a pure-Hindi narration for TTS
+        # Merge scores + narration into the final response
+        result = {
+            "suitable": suitable,
+            "suitability_score": total,
+            "data_source": "knowledge_base",
+            "crop_display_name": calc["crop_display_name"],
+            "region_name": region["name"],
+            "sub_scores": {
+                "temperature": {"score": sub_scores["temperature"]["score"], "status": sub_scores["temperature"]["status"], "reason": sub_scores["temperature"]["reason"]},
+                "soil": {"score": sub_scores["soil"]["score"], "status": sub_scores["soil"]["status"], "reason": sub_scores["soil"]["reason"]},
+                "rainfall": {"score": sub_scores["rainfall"]["score"], "status": sub_scores["rainfall"]["status"], "reason": sub_scores["rainfall"]["reason"]},
+                "season": {"score": sub_scores["season"]["score"], "status": sub_scores["season"]["status"], "reason": sub_scores["season"]["reason"]},
+            },
+            "image_analysis": image_context if image_context else None,
+            "weather_analysis": narration.get("weather_analysis", ""),
+            "soil_analysis": narration.get("soil_analysis", ""),
+            "yearly_climate_analysis": narration.get("yearly_climate_analysis", ""),
+            "recommendations": narration.get("recommendations", []),
+            "precautions": narration.get("precautions", []),
+        }
+
+        # ---------------------------------------------------------------
+        # Hindi narration for TTS
+        # ---------------------------------------------------------------
         try:
-            score = result.get("suitability_score", 0)
-            suitable = result.get("suitable", "")
-            recs = result.get("recommendations", [])
-            precs = result.get("precautions", [])
             suitable_hi = (
                 "atyadhik upayukt" if suitable == "Highly Suitable"
                 else "madhyam roop se upayukt" if suitable == "Moderately Suitable"
                 else "anupayukt"
             )
-            recs_text = ". ".join(recs[:3]) if recs else ""
-            precs_text = ". ".join(precs[:2]) if precs else ""
-
+            recs_text = ". ".join(result["recommendations"][:3])
+            precs_text = ". ".join(result["precautions"][:2])
             hindi_prompt = (
-                f"Tum ek krishi visheshagya ho. Fasal: {payload.crop_name}. Mitti: {payload.soil_type}. "
-                f"Upayuktataa: {suitable_hi}. Score: {score} pratishat. "
+                f"Tum ek krishi visheshagya ho. Fasal: {calc['crop_display_name']}. Mitti: {payload.soil_type}. "
+                f"Kshetra: {region['name']}. Upayuktataa: {suitable_hi}. Score: {total} pratishat. "
                 f"Sifarishen: {recs_text}. Savdhaaniyan: {precs_text}. "
-                f"Teen se chaar vaakya mein Hindi mein saaraansh do."
+                f"Teen se chaar vaakya mein shuddh Hindi mein saaraansh do."
             )
-
             hindi_response = await client.chat.completions.create(
                 model="llama3-8b-8192",
                 messages=[
                     {"role": "system", "content": "Tum ek Hindi krishi salahkar ho. Sirf shuddh Hindi mein uttar do."},
-                    {"role": "user", "content": hindi_prompt}
+                    {"role": "user", "content": hindi_prompt},
                 ],
                 max_tokens=300,
                 temperature=0.3,
             )
             result["hindi_narration"] = hindi_response.choices[0].message.content.strip()
         except Exception as hi_err:
-            print(f"[WARNING] Hindi narration generation failed: {hi_err}")
-            result["hindi_narration"] = (
-                f"{payload.crop_name} fasal ki upayuktataa report. "
-                f"Score {result.get('suitability_score', 0)} pratishat. "
-                f"Nishchay: {suitable_hi}."
-            )
+            print(f"[WARNING] Hindi narration failed (non-critical): {hi_err}")
+            result["hindi_narration"] = f"{calc['crop_display_name']} fasal ki upayuktataa score {total} pratishat hai. Nishchay: {suitable_hi}."
 
         return result
+
+    except HTTPException:
+        raise
     except Exception as e:
-        print(f"[ERROR] CRITICAL LLM EXCEPTION in check-suitability: {e}")
+        print(f"[ERROR] CRITICAL EXCEPTION in check-suitability: {e}")
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Crop suitability analysis failed: {str(e)}")
 
