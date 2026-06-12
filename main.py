@@ -1167,35 +1167,75 @@ async def check_crop_suitability(payload: SuitabilityPayload):
         }
 
         # ---------------------------------------------------------------
-        # Hindi narration for TTS
+        # Hindi narration for TTS — full report script
         # ---------------------------------------------------------------
         try:
-            suitable_hi = (
-                "atyadhik upayukt" if suitable == "Highly Suitable"
-                else "madhyam roop se upayukt" if suitable == "Moderately Suitable"
-                else "anupayukt"
+            suitable_hi_label = (
+                "अत्यंत उपयुक्त" if suitable == "Highly Suitable"
+                else "मध्यम रूप से उपयुक्त" if suitable == "Moderately Suitable"
+                else "अनुपयुक्त"
             )
-            recs_text = ". ".join(result["recommendations"][:3])
-            precs_text = ". ".join(result["precautions"][:2])
-            hindi_prompt = (
-                f"Tum ek krishi visheshagya ho. Fasal: {calc['crop_display_name']}. Mitti: {payload.soil_type}. "
-                f"Kshetra: {region['name']}. Upayuktataa: {suitable_hi}. Score: {total} pratishat. "
-                f"Sifarishen: {recs_text}. Savdhaaniyan: {precs_text}. "
-                f"Teen se chaar vaakya mein shuddh Hindi mein saaraansh do."
+            temp_s  = sub_scores["temperature"]
+            soil_s  = sub_scores["soil"]
+            rain_s  = sub_scores["rainfall"]
+            seas_s  = sub_scores["season"]
+            recs_numbered  = " ".join([f"{i+1}. {r}" for i, r in enumerate(result["recommendations"])])
+            precs_numbered = " ".join([f"{i+1}. {p}" for i, p in enumerate(result["precautions"])])
+
+            hindi_system = (
+                "आप एक वरिष्ठ कृषि विशेषज्ञ हैं जो किसानों को हिंदी में सलाह देते हैं। "
+                "आपका उत्तर शुद्ध हिंदी देवनागरी लिपि में होना चाहिए। "
+                "कोई भी अंग्रेज़ी शब्द उपयोग न करें। "
+                "कोई बुलेट चिह्न, तारा चिह्न, या विशेष प्रतीक उपयोग न करें — केवल सादे वाक्य लिखें जो TTS के लिए उपयुक्त हों।"
             )
+
+            hindi_user = (
+                f"निम्नलिखित फसल विश्लेषण रिपोर्ट को एक प्रवाहमान हिंदी वाक्य-शृंखला में प्रस्तुत करें:\n\n"
+                f"फसल का नाम: {calc['crop_display_name']}\n"
+                f"मिट्टी का प्रकार: {payload.soil_type}\n"
+                f"क्षेत्र: {region['name']}\n"
+                f"कुल उपयुक्तता स्कोर: {total} में से 100\n"
+                f"निर्णय: {suitable_hi_label}\n\n"
+                f"कारक-वार विश्लेषण:\n"
+                f"  तापमान कारक: {temp_s['score']} में से 25 अंक। कारण: {temp_s['reason']}\n"
+                f"  मिट्टी कारक: {soil_s['score']} में से 25 अंक। कारण: {soil_s['reason']}\n"
+                f"  वर्षा कारक: {rain_s['score']} में से 25 अंक। कारण: {rain_s['reason']}\n"
+                f"  मौसम कारक: {seas_s['score']} में से 25 अंक। कारण: {seas_s['reason']}\n\n"
+                f"वायुमंडलीय विश्लेषण: {result['weather_analysis']}\n"
+                f"मिट्टी विश्लेषण: {result['soil_analysis']}\n"
+                f"वार्षिक जलवायु विश्लेषण: {result['yearly_climate_analysis']}\n\n"
+                f"कृषि सिफारिशें: {recs_numbered}\n"
+                f"आवश्यक सावधानियाँ: {precs_numbered}\n\n"
+                f"कृपया इस पूरी रिपोर्ट को सरल, स्पष्ट हिंदी में पढ़ने योग्य रूप में लिखें। "
+                f"शुरुआत फसल के नाम और निर्णय से करें, फिर स्कोर, फिर कारक विश्लेषण, फिर सिफारिशें, फिर सावधानियाँ।"
+            )
+
             hindi_response = await client.chat.completions.create(
                 model="llama3-8b-8192",
                 messages=[
-                    {"role": "system", "content": "Tum ek Hindi krishi salahkar ho. Sirf shuddh Hindi mein uttar do."},
-                    {"role": "user", "content": hindi_prompt},
+                    {"role": "system", "content": hindi_system},
+                    {"role": "user", "content": hindi_user},
                 ],
-                max_tokens=300,
+                max_tokens=800,
                 temperature=0.3,
             )
             result["hindi_narration"] = hindi_response.choices[0].message.content.strip()
         except Exception as hi_err:
             print(f"[WARNING] Hindi narration failed (non-critical): {hi_err}")
-            result["hindi_narration"] = f"{calc['crop_display_name']} fasal ki upayuktataa score {total} pratishat hai. Nishchay: {suitable_hi}."
+            # Robust Devanagari fallback covering key fields
+            suitable_hi_label = (
+                "अत्यंत उपयुक्त" if suitable == "Highly Suitable"
+                else "मध्यम रूप से उपयुक्त" if suitable == "Moderately Suitable"
+                else "अनुपयुक्त"
+            )
+            result["hindi_narration"] = (
+                f"{calc['crop_display_name']} फसल की उपयुक्तता रिपोर्ट। "
+                f"कुल स्कोर: {total} में से 100। निर्णय: {suitable_hi_label}। "
+                f"तापमान स्कोर: {sub_scores['temperature']['score']} में से 25। "
+                f"मिट्टी स्कोर: {sub_scores['soil']['score']} में से 25। "
+                f"वर्षा स्कोर: {sub_scores['rainfall']['score']} में से 25। "
+                f"मौसम स्कोर: {sub_scores['season']['score']} में से 25।"
+            )
 
         return result
 
