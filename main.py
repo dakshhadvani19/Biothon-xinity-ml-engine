@@ -1186,6 +1186,7 @@ async def check_crop_suitability(payload: SuitabilityPayload):
                 "आप एक वरिष्ठ कृषि विशेषज्ञ हैं जो किसानों को हिंदी में सलाह देते हैं। "
                 "आपका उत्तर शुद्ध हिंदी देवनागरी लिपि में होना चाहिए। "
                 "कोई भी अंग्रेज़ी शब्द उपयोग न करें। "
+                "सभी संख्याएँ (numbers) हिंदी शब्दों में लिखें (जैसे: 'सौ', 'पच्चीस', 'दस'), अंकों (digits) का उपयोग बिल्कुल न करें। "
                 "कोई बुलेट चिह्न, तारा चिह्न, या विशेष प्रतीक उपयोग न करें — केवल सादे वाक्य लिखें जो TTS के लिए उपयुक्त हों।"
             )
 
@@ -1320,7 +1321,8 @@ CORE RULES — FOLLOW STRICTLY:
             "\n\n[IMPORTANT] You MUST respond with ONLY a valid JSON object — no markdown, no explanation. "
             "The JSON must have exactly two keys: "
             "'content_en' (your full answer in English) and "
-            "'content_hi' (the EXACT same answer translated into Hindi, written in Devanagari script). "
+            "'content_hi' (the EXACT same answer translated into Hindi, written in Devanagari script. "
+            "For 'content_hi', you MUST spell out all numbers in Hindi words (e.g., 'सौ', 'पच्चीस', 'दस') instead of using digits). "
             "Do NOT add any other keys. Do NOT wrap in code blocks."
         )
         # Inject the bilingual instruction into the last user message
